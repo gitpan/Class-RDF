@@ -92,3 +92,7 @@ my $lwall = Class::RDF::Object->find_or_create({ foaf->name => "Larry Wall" });
 isa_ok($lwall, "Class::RDF::Object", "find_or_create new" );
 is($lwall->foaf::name, "Larry Wall", 
     "find_or_create new has correct foaf:name" );
+
+my $rdf = Class::RDF->serialize($zool,$sderle,$lwall);
+my @found = Class::RDF->parse(xml => $rdf);
+is(scalar(@found),3,"happily serialised and re-parsed 3 objects");

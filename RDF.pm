@@ -248,7 +248,7 @@ sub search {
     }
 
     if ( $args{like} ) {
-	my @nodes = Class::RDF::Node->search_like( value => $args{object} );
+	my @nodes = Class::RDF::Node->search_like( value => '%'.$args{object}.'%' );
 	return $class->_ids_to_objects([]) unless @nodes;
 	push @where, "object IN (" . join(",", map($_->id, @nodes)) . ")";
     }
@@ -381,7 +381,7 @@ sub statements {
 sub triples {
     my $self = shift;
     $self->_fetch_statements if $self->{stub};
-    return map( $_->triples, $self->statements  );
+    return map( [$_->triples], $self->statements  );
 }
 
 sub uri {
@@ -527,7 +527,7 @@ use strict;
 use warnings;
 
 our ($Parser, $Serializer);
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 sub new {
     my $class = shift;
