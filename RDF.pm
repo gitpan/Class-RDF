@@ -3,7 +3,7 @@ package Class::RDF::Store;
 use base "Class::DBI";
 use File::Temp;
 
-our @Create_SQL = (<<'', <<'', <<'');
+our @Create_SQL = (<<'', <<'', <<'', <<'');
     create table ns (
 	prefix char(16),
 	uri char(255)
@@ -24,6 +24,14 @@ our @Create_SQL = (<<'', <<'', <<'');
 	object integer,
 	context integer
     );
+
+     create table metastatement (
+        id integer primary key,
+        created timestamp,
+        subject integer,
+        predicate integer,
+        object integer
+    );	
 
 
 sub is_transient {
@@ -115,8 +123,9 @@ sub _build_prefix_re {
 package Class::RDF::Node;
 
 use base "Class::RDF::Store";
-#use overload '""' => \&as_string;
-use Digest::MD5 'md5_hex';
+use overload '""' => \&as_string,
+	eq  => \&_string_eq;
+ 
 use warnings;
 use strict;
 
@@ -130,25 +139,44 @@ sub new {
     my $value = shift || "";
     return $class if ref $class and $class->isa(__PACKAGE__);
 
-    return $Cache{$value} if $Cache{$value};
+    my $cached = $class->cache($value);
+    return $cached if $cached;
 
     my $is_resource = ($value =~ /^\w+:\S+$/o ? 1 : 0);
     my $obj =$class->find_or_create({ value => $value, is_resource => $is_resource });
-    $Cache{$value} = $obj;
+    return $class->cache($value, $obj);
 }
 
 sub find {
     my ($class,$value) = @_;
     return unless defined $value;
-    return $Cache{$value} if $Cache{$value};
+    
+    my $cached = $class->cache($value);
+    return $cached if $cached;
+
     my ($found) = $class->search({ value => $value });
-    $Cache{$value} = $found if $found;
+    $class->cache($value, $found) if $found;
     return $found;   
+}
+
+sub cache {
+    my ($class, $value, $node) = @_;
+    if ($node) {
+	return ($Cache{$value} = $node);
+    } elsif (exists $Cache{$value}) {
+	return $Cache{$value} 
+    } else {
+	return undef;
+    }
 }
 
 sub as_string {
     my $self = shift;
     return $self->value;
+}
+sub _string_eq {
+    my ($self,$other) = @_;
+    $self->as_string eq $other; 
 }
 
 package Class::RDF::Statement;
@@ -157,42 +185,53 @@ use base "Class::RDF::Store";
 use warnings;
 use strict;
 
+use constant Node   => "Class::RDF::Node";
+use constant Object => "Class::RDF::Object";
+
 our @Quad = qw( subject predicate object context );
 
 __PACKAGE__->table( "statement" );
 __PACKAGE__->columns( All => "id", "created", @Quad );
-__PACKAGE__->has_a( subject   => "Class::RDF::Node" );
-__PACKAGE__->has_a( predicate => "Class::RDF::Node" );
-__PACKAGE__->has_a( object    => "Class::RDF::Node" );
-__PACKAGE__->has_a( context   => "Class::RDF::Node" );
+__PACKAGE__->has_a( $_ => Node ) for @Quad;
 __PACKAGE__->autoupdate(1);
 
-__PACKAGE__->set_sql( RetrieveFull => <<'' );
+__PACKAGE__->set_sql( RetrieveFull => <<"" );
     SELECT st.*, n.*
     FROM statement st, node n
-    WHERE %s AND (
-	   subject   = n.id 
-	OR predicate = n.id 
-	OR object    = n.id 
-	OR context   = n.id ) 
+    WHERE %s 
+	AND ( st.subject   = n.id 
+	    OR st.predicate = n.id 
+	    OR st.object    = n.id 
+	    OR st.context   = n.id ) 
 
-__PACKAGE__->set_sql( RetrieveOrdered => <<'' );
+
+__PACKAGE__->set_sql( RetrieveOrdered => <<"" );
     SELECT st.*, n.*
     FROM statement st, node n, node m
-    WHERE %s AND (
-	   subject   = n.id 
-	OR predicate = n.id 
-	OR object    = n.id 
-	OR context   = n.id )
-    AND m.id = object
+    WHERE %s
+	AND ( st.subject   = n.id 
+	    OR st.predicate = n.id 
+	    OR st.object    = n.id 
+	    OR st.context   = n.id ) 
+	AND m.id = object
     ORDER BY m.value %s
+
+__PACKAGE__->set_sql( RetrieveObjects => <<"" );
+    SELECT obj.*, n.*
+    FROM statement st, statement obj, node n
+    WHERE %s
+	AND obj.subject = st.subject 
+	AND ( obj.subject   = n.id 
+	    OR obj.predicate = n.id 
+	    OR obj.object    = n.id 
+	    OR obj.context   = n.id ) 
 
 sub new {
     my ($class, @nodes) = @_;
 
     my @triple;
     for my $node (@nodes) {
-	$node = Class::RDF::Node->new($node) unless ref $node;
+	$node = $class->Node->new($node) unless ref $node;
 	push @triple, $node;
     }
     $class->find_or_create({ subject	=> $triple[0],
@@ -206,7 +245,7 @@ sub value {
     my $self = shift;
     my $obj  = $self->object;
     return $obj->is_resource ?
-	Class::RDF::Object->new($obj->value) : $obj->value;
+	$self->Object->new($obj->value) : $obj->value;
 }
 
 sub triples {
@@ -229,47 +268,67 @@ sub search {
     my $class = shift;
     my %args = ref($_[0]) ? %{$_[0]} : @_;
 
+    $args{like} = delete $args{object} if $args{like};
+
+    my ($where, $vals) = $class->compose_query(%args);
+    return $class->no_match unless ref $where;
+
+    if ( $args{like} ) {
+	my @nodes = $class->Node->search_like( value => '%'.$args{like}.'%' );
+	return $class->no_match unless @nodes;
+	push @$where, "st.object IN (" . join(",", map($_->id, @nodes)) . ")";
+    }
+
+    my $sth;
+    if ( $args{objects} ) {
+	$sth = $class->sql_RetrieveObjects( join(" AND ", @$where) );
+    } elsif ( $args{order} ) {
+	$sth = $class->sql_RetrieveOrdered( join(" AND ", @$where), $args{order} );
+    } else {
+	$sth = $class->sql_RetrieveFull( join(" AND ", @$where) );
+    }
+
+    return $class->retrieve_from_sth($sth, @$vals);
+}
+
+sub no_match {
+    my $class = shift;
+    $class->_ids_to_objects([]);
+}
+
+sub compose_query {
+    my ($class, %args) = @_;
+    my (@where, @vals);
+
     $args{predicate} = Class::RDF::NS->expand( $args{predicate} )
 	if exists $args{predicate} and not ref $args{predicate};
 
-    my (@where, @vals);
-    my @position = grep exists $args{$_}, qw{ subject predicate context };
-    push @position, "object" if exists $args{object} and not $args{like};
-    
-    for my $position (@position) {
-	push @where, "$position = ?";
+    for my $position (grep exists $args{$_}, @Quad) {
+	push @where, "st.$position = ?";
 	if ( ref $args{$position} ) {
 	    push @vals, $args{$position};
 	} else { 
-	    my $node = Class::RDF::Node->find( $args{$position} ) 
-		or return $class->_ids_to_objects([]);
+	    my $node = $class->Node->find( $args{$position} ) or return;
 	    push @vals, $node;
 	}
     }
 
-    if ( $args{like} ) {
-	my @nodes = Class::RDF::Node->search_like( value => '%'.$args{object}.'%' );
-	return $class->_ids_to_objects([]) unless @nodes;
-	push @where, "object IN (" . join(",", map($_->id, @nodes)) . ")";
-    }
+    return (\@where, \@vals);
+}
 
-    my $sth;
-    if ( $args{order} ) {
-	$sth = $class->sql_RetrieveOrdered( join(" AND ", @where), $args{order} );
-    } else {
-	$sth = $class->sql_RetrieveFull( join(" AND ", @where) );
-    }
+sub retrieve_from_sth {
+    my ($class, $sth, @bind) = @_;
 
     my (@results, %nodes, %triples, %t, %n);
     eval {
-	$sth->execute( @vals );
+	$sth->execute( map($_->id, @bind) );
 	$sth->bind_columns(\(
 	    @t{qw{ id created subject predicate object context }},
 	    @n{qw{ id created value is_resource }} ));
 
 	while ($sth->fetch) {
 	    unless ( exists $nodes{$n{id}} ) {
-		$nodes{$n{id}} = Class::RDF::Node->construct(\%n);
+		$nodes{$n{id}} = $class->Node->construct(\%n);
 	    }
 	    unless ( exists $triples{$t{id}} ) {
 		push @results, ( $triples{$t{id}} = {%t} );
@@ -285,9 +344,6 @@ sub search {
 	    $st->{$which} = $nodes{$st->{$which}} if $st->{$which};
 	}
     }
-
-    # warn scalar(@results), " statements fetched\n";
-    # warn "< ", join(" ", map($_->id, @$_{@Quad})), " >\n" for @results;
 
     return $class->_ids_to_objects(\@results);
 }
@@ -319,10 +375,14 @@ sub search {
 package Class::RDF::Object;
 
 use Carp;
-#use overload '""' => \&as_string;
+use overload '""' => \&as_string,
+	      eq  => sub { $_[0]->as_string eq $_[1] };
 use vars '$AUTOLOAD';
 use strict;
 use warnings;
+
+use constant Node      => "Class::RDF::Node";
+use constant Statement => "Class::RDF::Statement";
 
 sub new {
     my $class = shift;
@@ -334,10 +394,10 @@ sub new {
     $base ||= '_id:';		
     $uri ||= $base.sprintf("%08x%04x", time, int rand(0xFFFF));
     unless (ref $uri) {
-	$uri = Class::RDF::Node->new($uri);
+	$uri = $class->Node->new($uri);
     }
     
-    $context = Class::RDF::Node->find($context)
+    $context = $class->Node->find($context)
     	if $context and not ref $context;
 
     my $self = bless { 
@@ -350,7 +410,7 @@ sub new {
     while (my ($key, $vals) = each %$data) {
 	for my $val (ref $vals eq 'ARRAY' ? @$vals : $vals) {
 	    $val = $val->{uri}->value if ref($val) and $val->{'uri'};
-	    my $st = Class::RDF::Statement->new( $uri, $key, $val );
+	    my $st = $self->Statement->new( $uri, $key, $val );
 	    $self->_add_statement($st);
 	}
     }
@@ -360,7 +420,7 @@ sub new {
 sub _fetch_statements {
     my $self = shift;
     # warn "fetch_statements ", $self->uri->value, "\n";
-    my $iter = Class::RDF::Statement->search( subject => $self->uri );
+    my $iter = $self->Statement->search( subject => $self->uri );
     while (my $st = $iter->next) {
 	$self->_add_statement($st);
     }
@@ -395,6 +455,10 @@ sub as_string {
     my $self = shift;
     return $self->uri->as_string;
 }
+sub _string_eq {
+    my ($self,$other) = @_;
+    $self->as_string eq $other;
+}
 
 sub context {
     my $self = shift;
@@ -421,12 +485,31 @@ sub set {
 
 	for my $value (ref($val) eq "ARRAY" ? @$val : $val) {
 	    $value = $value->uri if ref($value) and $value->can('uri');
-	    my $triple = Class::RDF::Statement->new(
+	    my $triple = $self->Statement->new(
 			$self->uri->value, $key, $value, $self->context );
 		    $self->_add_statement( $triple );
 	}
     }
 }
+
+# delete forward and backward references to me
+# 
+  sub delete {
+	my $self = shift;
+	my $uri =  $self->uri->value;
+# triples that have my subject, and other predicate and object.
+# 
+	my @triples = $self->statements;	
+	foreach (@triples) {
+		$_->delete;
+	}
+# triples that have me as their object
+	my @pointers = Class::RDF::Statement->search(object => $uri);
+	foreach (@pointers) {
+		$_->delete;
+	}
+# is that really it?  
+  }
 
 sub get_or_set {
     my ($self, $prop, @vals) = @_;
@@ -444,7 +527,7 @@ sub add {
         for my $value (ref($val) eq "ARRAY" ? @$val : $val) {
 	    $value = $value->{uri} if ref($value) and $value->{uri};
 	   
-	    my $triple = Class::RDF::Statement->new(
+	    my $triple = $self->Statement->new(
 		$self->uri, $key, $value, $self->context );
 	    $self->_add_statement( $triple );
 	}	
@@ -461,9 +544,9 @@ sub remove {
 	    $o = $o->{uri}->value if ref($o) and $o->{uri};
 	    $remove{$o} = 1;		
 	}
-        
+
 	my $triples = $self->{triples}{$key};
-	for (my $st = 0; $st < $#$triples; $st++) {
+	for (my $st = 0; $st < scalar(@$triples); $st++) {
 	    if ($remove{$triples->[$st]->object->value}) {
 		$triples->[$st]->delete;
 		splice @$triples, $st--, 1;
@@ -482,22 +565,23 @@ sub contains {
 
 sub find {
     my ($class, $uri) = @_;
-    my $node = Class::RDF::Node->find($uri);
+    my $node = $class->Node->find($uri);
     return $node ? $class->new($node) : undef;
 }
 
 sub find_or_create {
-    my ($class, $args) = @_;
+    my $class = shift;
+    my ($args) = @_;
     my $obj;
-    
+
     if (ref $args eq "HASH") {
 	($obj) = $class->search( %$args );
     } else { # $args is really a uri
 	$obj = $class->new( $args );
     }
 
-    return $obj if $obj;
-    return $class->new( @_ );
+    $obj ||= $class->new( @_ );
+    return $obj;
 }
 
 sub search {
@@ -506,14 +590,25 @@ sub search {
     my %args = (ref($args) ? %$args : ());
     $args{predicate} = $predicate;
     $args{object} = $object if $object;
-    my $iter = Class::RDF::Statement->search( %args );
+    my $iter = $class->Statement->search( %args, objects => 1 );
 
     my (@results, %seen);
     while (my $st = $iter->next) {
 	my $id = $st->subject->id;
-	push @results, $seen{$id} = $class->new( $st->subject )
-	    unless $seen{$id};
+	unless ( $seen{$id} ) {
+	    $seen{$id} = $class->new( $st->subject, {} );
+	    delete $seen{$id}{stub};
+	    push @results, $seen{$id};
+	}
+	$seen{$id}->_add_statement($st);
     }
+
+    if (my $order = $args{order}) {
+	@results =  map  { $_->[1] }
+		    sort { $order eq "asc" ? $a->[0] cmp $b->[0] : $b->[0] cmp $a->[0] }
+		    map	 { [($_->get($predicate))[0], $_] } @results;
+    }
+
     return( wantarray ? @results : $results[0] );
 }
 
@@ -526,18 +621,26 @@ use Carp;
 use strict;
 use warnings;
 
+use constant Node	=> "Class::RDF::Node";
+use constant Statement  => "Class::RDF::Statement";
+use constant Object	=> "Class::RDF::Object";
+
 our ($Parser, $Serializer);
-our $VERSION = '0.12';
+our $VERSION = '0.20';
 
 sub new {
     my $class = shift;
-    Class::RDF::Object->new( @_ );
+    $class->Object->new( @_ );
 }
 
 sub set_db {
     my $class = shift;
     Class::RDF::Store->set_db( Main => @_ );
     Class::RDF::NS->load;
+    if ( $_[0] =~ /^dbi:Pg:/io ) {
+	$class->Node->sequence( "node_id_seq" );
+	$class->Statement->sequence( "statement_id_seq" );
+    }
 }
 
 sub is_transient {
@@ -576,9 +679,11 @@ sub parse {
 
     $args{context} ||= $args{uri};
     for my $triple (@triples) {
-	Class::RDF::Statement->new(@$triple, $args{context});
-	$output{$triple->[0]} ||= Class::RDF->new($triple->[0]);
-    }
+	$class->Statement->new(@$triple, $args{context});
+	$output{$triple->[0]}++; 
+     }
+
+    $output{$_} = $class->new($_) for keys %output;
   
     my $first = delete $output{$root};
     return ($first, values %output);
@@ -638,20 +743,29 @@ Class::RDF - Perl extension for mapping objects to RDF and back
   my @people = Class::RDF::Object->search( rdf->type => foaf->Person );
   for my $person (@people) {
       print $person->foaf::OnlineAccount->foaf::nick, "\n";
+      print $person->foaf::OnlineAccount->foaf::mbox;	
   }
+
+  # delete an object. This has the effect of deleting all triples which
+  # have that object's uri as either subject or object.
+
+  $person->delete;
 
   my $rdf_xml = Class::RDF->serialize( @people );
 
 =head1 DESCRIPTION
 
-  Class::RDF is a perl object layer over an RDF triplestore. 
-  It is based on Class::DBI, the perl object / RDBMS package.
-  Thus it works with mysql, postgresql, sqlite etc.
-  Look in the sql/ directory distributed with this module for database schemas.
+Class::RDF is a perl object layer over an RDF triplestore. 
+It is based on Class::DBI, the perl object / RDBMS package.
+Thus it works with mysql, postgresql, sqlite etc.
+Look in the sql/ directory distributed with this module for database schemas.
 
-  It provides an 'rdf-y' shortcut syntax for addressing object properties.
-  It also contains a triples-matching RDF API.
+It provides an 'rdf-y' shortcut syntax for addressing object properties.
+It also contains a triples-matching RDF API, which works like Class::DBI.
 	  		
+Version 0.20 contains *experimental* support for a memcached store to 
+sit in between the triplestore and e.g. mod_perl. Please feel free to play with it but DONT use it in production code - it's partially broken.
+ 
 =head2 Class::RDF
 
 =head2 METHODS
@@ -760,6 +874,10 @@ Class::RDF also provides the equivalent of a triples-matching API to the RDF sto
 	my $node = Class::RDF::Node->new($uri); # create or retrieve
 	my $exists = Class::RDF::Node->find($uri);
 
+=head1 DEVELOPMENT
+  
+Class::RDF is attempting to be a 'literate project'. This means we're journalling code decisions and code changes publically, to start with. Aiming towards fuller use of literate programming principles. Thanks liberally Rocco Caputo for inspiration and conversation along these lines. see http://frot.org/classrdf/ 
+  	
 =head1 SEE ALSO
 
   Class::DBI(3pm), RDF::Simple(3pm)
@@ -768,7 +886,7 @@ Class::RDF also provides the equivalent of a triples-matching API to the RDF sto
 
 =head1 TODO/BUGS
 
-  lots! 
+The main outstanding is a metastatement level, so you can make statements about statements and use that to track versions, competing assertions, etc. Check the project journals for our progress on this.
 
 =head1 AUTHORS
 

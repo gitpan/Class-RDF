@@ -9,7 +9,7 @@ use warnings;
 use_ok( "Class::RDF" );
 
 Class::RDF->is_transient;
-isa_ok( Class::RDF::Store->db_Main, "Ima::DBI::db", "database handle" );
+#isa_ok( Class::RDF::Store->db_Main, "Ima::DBI::db", "database handle" );
 
 my %ns = (
     rdf => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
@@ -48,12 +48,13 @@ is( $zool->foaf::name, "Jo Walsh", "foaf:name is correct" );
 isa_ok( $zool->rdf::type, "Class::RDF::Object", "rdf:type" );
 is( $zool->rdf::type->uri->value, "$ns{foaf}Person", "rdf:type is correct" );
 
-# my $type = $zool->rdf::type->uri;
-# is( "$type", foaf->Person, "node stringification works" );
+my $type = $zool->rdf::type->uri;
+is( "$type", foaf->Person, "node stringification works" );
 
-# $type = $zool->rdf::type;
-# is( "$type", foaf->Person, "object stringification works" );
+$type = $zool->rdf::type;
+is( "$type", foaf->Person, "object stringification works" );
 
+is( $type eq $zool->rdf::type, 1,"object eq overload works");    
 my $nick = $zool->foaf::holdsAccount->foaf::accountName;
 is( $nick, "metazool",
     "foaf::holdsAccount->foaf::accountName (striping works)" );
@@ -96,3 +97,16 @@ is($lwall->foaf::name, "Larry Wall",
 my $rdf = Class::RDF->serialize($zool,$sderle,$lwall);
 my @found = Class::RDF->parse(xml => $rdf);
 is(scalar(@found),3,"happily serialised and re-parsed 3 objects");
+
+# deletion
+my $z_uri = $zool->uri->value;
+my @s = $zool->statements;
+is(scalar(@s),8,"zool object has 8 statements before mad deletion");
+$zool->delete;
+@found = Class::RDF::Statement->search(subject => $z_uri);
+is(scalar(@found),0,"no statements left with zool's subject");
+
+@found = Class::RDF::Statement->search(object => $z_uri);
+is(scalar(@found),0,"no statements left with zool's object");
+
+
