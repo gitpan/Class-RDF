@@ -1,6 +1,42 @@
 package Class::RDF::Store;
 
 use base "Class::DBI";
+use File::Temp;
+
+our @Create_SQL = (<<'', <<'', <<'');
+    create table ns (
+	prefix char(16),
+	uri char(255)
+    );
+
+    create table node (
+	id integer primary key,
+	created timestamp,
+	value text,
+	is_resource integer(1)
+    );
+
+    create table statement (
+	id integer primary key,
+	created timestamp,
+	subject integer,
+	predicate integer,
+	object integer,
+	context integer
+    );
+
+
+sub is_transient {
+    my $class = shift;
+    my %args  = ( TEMPLATE => "crdfXXXX", SUFFIX => ".db", UNLINK => 1, @_ );
+    my $tmp   = File::Temp->new( %args );
+
+    $class->set_db( Main => "dbi:SQLite:".$tmp->filename, "", "" );
+
+    for my $st (@Create_SQL) {
+	$class->db_Main->do($st);
+    }
+}
 
 package Class::RDF::NS;
 
@@ -103,6 +139,7 @@ sub new {
 
 sub find {
     my ($class,$value) = @_;
+    return unless defined $value;
     return $Cache{$value} if $Cache{$value};
     my ($found) = $class->search({ value => $value });
     $Cache{$value} = $found if $found;
@@ -117,7 +154,6 @@ sub as_string {
 package Class::RDF::Statement;
 
 use base "Class::RDF::Store";
-use Time::Piece;
 use warnings;
 use strict;
 
@@ -256,25 +292,29 @@ sub search {
     return $class->_ids_to_objects(\@results);
 }
 
-sub ical_to_sql {
-    my ($class,$ical) = @_;
-    warn($ical);
-    my $t = Time::Piece->strptime($ical,"%Y%m%dT%H%M%SZ");
-    $t->strftime("%Y%m%d%H%M%S");
-}
-
-sub timeslice {
-    my ($self,%p) = @_;
-    my $start = $p{start};
-    my $end = $p{end};
-    my @where;
-    # SQL for timestamp 
-    warn("time");
-    push @where, "created > " . $self->ical_to_sql($start) if $start;
-    push @where, "created < " . $self->ical_to_sql($end) if $end;
-    my $sql = join(" and ", @where); warn($sql); 
-    my @o = $self->retrieve_from_sql($sql);
-}
+# ... we need to figure out where this belongs ...
+#
+# use Time::Piece;
+# 
+# sub ical_to_sql {
+#     my ($class,$ical) = @_;
+#     warn($ical);
+#     my $t = Time::Piece->strptime($ical,"%Y%m%dT%H%M%SZ");
+#     $t->strftime("%Y%m%d%H%M%S");
+# }
+# 
+# sub timeslice {
+#     my ($self,%p) = @_;
+#     my $start = $p{start};
+#     my $end = $p{end};
+#     my @where;
+#     # SQL for timestamp 
+#     warn("time");
+#     push @where, "created > " . $self->ical_to_sql($start) if $start;
+#     push @where, "created < " . $self->ical_to_sql($end) if $end;
+#     my $sql = join(" and ", @where); warn($sql); 
+#     my @o = $self->retrieve_from_sql($sql);
+# }
 
 package Class::RDF::Object;
 
@@ -487,7 +527,7 @@ use strict;
 use warnings;
 
 our ($Parser, $Serializer);
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 sub new {
     my $class = shift;
@@ -498,6 +538,11 @@ sub set_db {
     my $class = shift;
     Class::RDF::Store->set_db( Main => @_ );
     Class::RDF::NS->load;
+}
+
+sub is_transient {
+    my $class = shift;
+    Class::RDF::Store->is_transient;
 }
 
 sub define {
@@ -565,26 +610,31 @@ Class::RDF - Perl extension for mapping objects to RDF and back
 
   use Class::RDF;
 
+  # connect to an existing database
   Class::RDF->set_db( "dbi:mysql:rdf", "user", "pass" );
 
+  # or use a temporary database
+  Class::RDF->is_transient;
+
+  # define xml namespace aliases, export some as perl namespaces.
   Class::RDF->define(
       rdf => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
       rdfs => "http://www.w3.org/2000/01/rdf-schema#",
       foaf => "http://xmlns.com/foaf/0.1/",
   );
-  # define xml namespace aliases, export some as perl namespaces.
  	
   Class::RDF::NS->export( 'rdf', 'rdfs', 'foaf' );
 
-  my @objects = Class::RDF->parse( xml => $some_rdf_xml );
   # eat RDF from the world
+  my @objects = Class::RDF->parse( xml => $some_rdf_xml );
   @objects = Class::RDF->parse( uri => $a_uri_pointing_to_some_rdf_xml );
 
+  # build our own RDF objects
   my $obj = Class::RDF::Object->new( $new_uri );
   $obj->rdf::type( foaf->Person );
   $obj->foaf::name( "Larry Wall" );
-  # build our own RDF objects
 
+  # search for RDF objects in the database
   my @people = Class::RDF::Object->search( rdf->type => foaf->Person );
   for my $person (@people) {
       print $person->foaf::OnlineAccount->foaf::nick, "\n";
@@ -605,6 +655,26 @@ Class::RDF - Perl extension for mapping objects to RDF and back
 =head2 Class::RDF
 
 =head2 METHODS
+
+=head3 set_db
+
+	Class::RDF->set_db( "dbi:mysql:rdfdb", "user", "pass );
+
+Specify the DBI connect string, username, and password of your
+RDF store. This method just wraps the set_db() method inherited
+from Class::DBI. If you want a simple temporary data store, use
+C<is_transient()> instead.
+
+=head3 is_transient
+
+	Class::RDF->is_transient;
+	Class::RDF->is_transient( DIR => "/tmp" );
+
+Specify a temporary data store for Class::RDF. Class::RDF uses File::Temp
+to create an SQLite data store in a temporary file that is removed when
+your program exits. Optional arguments to is_transient() are passed to
+File::Temp->new as is, potentially overriding Class::RDF's defaults. See
+L<File::Temp> for more details.
 
 =head3 define
 

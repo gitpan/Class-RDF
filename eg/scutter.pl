@@ -1,43 +1,52 @@
 #!/usr/bin/perl
 
 use Class::RDF;
-use RDF::Simple::Parser;
 use strict;
 
 my %ns = (
     rdf => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
     rdfs => "http://www.w3.org/2000/01/rdf-schema#",
     foaf => "http://xmlns.com/foaf/0.1/",
-    geo => "http://www.w3.org/2003/01/geo/wgs84_pos#",
     scutter => "http://purl.org/net/scutter/"
 );
 
-Class::RDF->set_db( "dbi:mysql:rdf", "sderle", "" );
+Class::RDF->set_db( "dbi:SQLite:scutter.db", "", "" );
 Class::RDF->define( %ns );
 Class::RDF::NS->export('rdf','rdfs','scutter','foaf');
-my %visited;
-my @plan = "http://iconocla.st/misc/foaf.rdf";
-my $seeAlso = Class::RDF::Node->new( rdfs->seeAlso );
 
-while (1) {
-    while (my $uri = shift @plan) {
-	warn "$uri\n";
+my $start = Class::RDF->new( data => {
+    rdf->type => scutter->Context,
+    scutter->source => "http://iconocla.st/misc/foaf.rdf",
+    scutter->last_fetched => -1
+});
 
-	$visited{$uri} = time;
-	my $count = eval { Class::RDF->parse($uri) };
-	if ($@) {
-	    warn $@;
-	    next;
-	}
-	warn "    + $count triples added\n";
+my @plan;
+
+while (my $prospect = Class::RDF::Object->search( scutter->last_fetched => -1 )) {
+    warn $prospect->scutter::source->uri->value, "\n";
+    my @parsed = eval { Class::RDF->parse(
+	uri => $prospect->scutter::source->uri->value) };
+    $prospect->scutter::last_fetched( time );
+    if ($@) {
+	warn $@;
+	next;
     }
-    my $iter = Class::RDF::Statement->search( predicate => $seeAlso );
-    while (my $st = $iter->next) {
-	my $prospect = $st->object->value;
-	unless (exists $visited{$prospect}) {
-	    push @plan, $prospect;
-	    $visited{$prospect} = 0;
-	    warn "    + adding $prospect to plan\n";
+    warn "+ ", scalar(@parsed), " objects added\n";
+
+    for my $obj (@parsed) {
+	if (my @seeAlso = $obj->rdfs::seeAlso) {
+	    for my $target (@seeAlso) {
+		my $uri = $target->uri->value;
+		warn "+ seeAlso: $uri\n";
+		my $source = Class::RDF::Object->find_or_create(
+		    { scutter->source => $uri });
+		warn $source->scutter::source->uri->value, " => ", $source->scutter::last_fetched; 
+		unless ($source->scutter::last_fetched) {
+		    $source->rdf::type( scutter->Context );
+		    $source->scutter::last_fetched( -1 );
+		    warn "+ Adding ", $uri, " to scutter plan.\n";
+		}
+	    }
 	}
     }
 }

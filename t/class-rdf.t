@@ -8,12 +8,7 @@ use warnings;
 
 use_ok( "Class::RDF" );
 
-system( "sqlite rdftest.db <sql/class-rdf.sqlite" )
-    and die "Can't locate sqlite commandline util -- not in your path?\n";
-
-END { unlink "rdftest.db" };
-
-Class::RDF->set_db( "dbi:SQLite:rdftest.db", "", "" );
+Class::RDF->is_transient;
 isa_ok( Class::RDF::Store->db_Main, "Ima::DBI::db", "database handle" );
 
 my %ns = (
@@ -38,6 +33,13 @@ is( scalar(@import), 5, "parsed 5 objects from $uri" );
 
 my @statements = Class::RDF::Statement->search( context => $uri );
 is( scalar(@statements), 20, "20 statements fetched" );
+
+my $node = Class::RDF::Node->find("Jo Walsh");
+isa_ok( $node, "Class::RDF::Node", "node found" );
+is( $node->value, "Jo Walsh", "node found has right value" );
+
+$node = Class::RDF::Node->find;
+is( $node, undef, "finding undef node doesn't wreak havoc" );
 
 my ($zool) = Class::RDF::Object->search(
     "http://xmlns.com/foaf/0.1/name" => "Jo Walsh" );
@@ -76,7 +78,17 @@ is($sderle->foaf::name, "Schuyler Erle",
     "matched object has correct foaf:name" );
 
 @who = Class::RDF::Object->search( foaf->name => undef, {order => "desc"});
-
 isa_ok($who[0], "Class::RDF::Object", "ordered match" );
 is($who[0]->foaf::name, "Schuyler Erle", 
     "ordered match has correct foaf:name" );
+
+$sderle = Class::RDF::Object->find_or_create(
+    { foaf->name => "Schuyler Erle" });
+isa_ok($sderle, "Class::RDF::Object", "find_or_create existing" );
+is($sderle->foaf::mbox_sha1sum, "4eb63c697f5b945727bad08cd889b19be41bd9aa",
+    "find_or_create existing has correct foaf:mbox_sha1sum" );
+
+my $lwall = Class::RDF::Object->find_or_create({ foaf->name => "Larry Wall" });
+isa_ok($lwall, "Class::RDF::Object", "find_or_create new" );
+is($lwall->foaf::name, "Larry Wall", 
+    "find_or_create new has correct foaf:name" );

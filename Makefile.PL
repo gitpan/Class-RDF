@@ -9,5 +9,6 @@ WriteMakefile(
 	"Class::DBI"  => 0.95,
 	"DBD::SQLite" => 0.29,
         "RDF::Simple" => 0.10,
+        "File::Temp"  => 0.12,
     }, # e.g., Module::Name => 1.1
 );
