@@ -1,0 +1,12 @@
+Changes
+Makefile.PL
+MANIFEST
+README
+RDF.pm
+sql/class-rdf.mysql
+sql/class-rdf.sqlite
+t/class-rdf.t
+t/foaf.rdf
+eg/query.cgi
+eg/scutter.pl
+META.yml                                 Module meta-data (added by MakeMaker)

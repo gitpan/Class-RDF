@@ -1,0 +1,82 @@
+#!perl
+
+use blib;
+use Test::More 'no_plan';
+use Data::Dumper;
+use strict;
+use warnings;
+
+use_ok( "Class::RDF" );
+
+system( "sqlite rdftest.db <sql/class-rdf.sqlite" )
+    and die "Can't locate sqlite commandline util -- not in your path?\n";
+
+END { unlink "rdftest.db" };
+
+Class::RDF->set_db( "dbi:SQLite:rdftest.db", "", "" );
+isa_ok( Class::RDF::Store->db_Main, "Ima::DBI::db", "database handle" );
+
+my %ns = (
+    rdf => "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
+    rdfs => "http://www.w3.org/2000/01/rdf-schema#",
+    foaf => "http://xmlns.com/foaf/0.1/",
+    geo => "http://www.w3.org/2003/01/geo/wgs84_pos#"
+);
+Class::RDF->define(%ns);
+isa_ok( $Class::RDF::NS::Cache{rdf}, "Class::RDF::NS", 
+    "namespace define hit cache" );
+is( $Class::RDF::NS::Cache{rdf}->prefix, "rdf", "namespace define prefix" );
+is( $Class::RDF::NS::Cache{rdf}->uri, $ns{rdf}, "namespace define uri" );
+
+Class::RDF::NS->export(qw( foaf rdf ));
+ok( foaf->can("AUTOLOAD"), "namespace export" );
+
+my $uri = "file:t/foaf.rdf";
+
+my @import = Class::RDF->parse(uri => $uri);
+is( scalar(@import), 5, "parsed 5 objects from $uri" );
+
+my @statements = Class::RDF::Statement->search( context => $uri );
+is( scalar(@statements), 20, "20 statements fetched" );
+
+my ($zool) = Class::RDF::Object->search(
+    "http://xmlns.com/foaf/0.1/name" => "Jo Walsh" );
+isa_ok( $zool, "Class::RDF::Object", "fetched object" );
+is( $zool->foaf::name, "Jo Walsh", "foaf:name is correct" );
+isa_ok( $zool->rdf::type, "Class::RDF::Object", "rdf:type" );
+is( $zool->rdf::type->uri->value, "$ns{foaf}Person", "rdf:type is correct" );
+
+# my $type = $zool->rdf::type->uri;
+# is( "$type", foaf->Person, "node stringification works" );
+
+# $type = $zool->rdf::type;
+# is( "$type", foaf->Person, "object stringification works" );
+
+my $nick = $zool->foaf::holdsAccount->foaf::accountName;
+is( $nick, "metazool",
+    "foaf::holdsAccount->foaf::accountName (striping works)" );
+
+my @who = $zool -> foaf::knows;
+is( scalar(@who), 3, "foaf:knows has correct cardinality" );
+
+my ($sderle) = grep(( ref $_ and
+    $_->foaf::mbox_sha1sum eq "4eb63c697f5b945727bad08cd889b19be41bd9aa" ),
+    @who );
+
+isa_ok($sderle, "Class::RDF::Object", "linked object" );
+is($sderle->foaf::name, "Schuyler Erle", 
+    "linked object has correct foaf:name" );
+
+is( foaf->knows, "http://xmlns.com/foaf/0.1/knows", "namespace lookup" );
+
+($sderle) = Class::RDF::Object->search( foaf->name, "%Erle", {like => 1});
+
+isa_ok($sderle, "Class::RDF::Object", "fuzzy match" );
+is($sderle->foaf::name, "Schuyler Erle", 
+    "matched object has correct foaf:name" );
+
+@who = Class::RDF::Object->search( foaf->name => undef, {order => "desc"});
+
+isa_ok($who[0], "Class::RDF::Object", "ordered match" );
+is($who[0]->foaf::name, "Schuyler Erle", 
+    "ordered match has correct foaf:name" );
